@@ -15,6 +15,18 @@ import (
 	"time"
 )
 
+func usage() {
+	fmt.Fprintf(os.Stderr, `Usage:
+	
+	teamcityrun <regex>		runs current diff on all build types matched (case insensitive) by regex
+	teamcityrun buildtypes		lists all available build types
+	teamcityrun status <build-id>	shows status of build
+	teamcityrun diff			shows current diff
+	
+`)
+	os.Exit(1)
+}
+
 // Reference:
 //  https://www.jetbrains.com/help/teamcity/cloud/2021.1/personal-build.html#Direct+Patch+Upload
 //  https://www.jetbrains.com/help/teamcity/rest/teamcity-rest-api-documentation.html
@@ -144,18 +156,6 @@ func getBuildTypes() []string {
 	return r
 }
 
-func usage() {
-	fmt.Fprintf(os.Stderr, `Usage:
-	
-	teamcityrun <regex>		runs current diff on all build types matched (case insensitive) by regex
-	teamcityrun buildtypes		lists all available build types
-	teamcityrun status <build-id>	shows status of build
-	teamcityrun diff			shows current diff
-	
-`)
-	os.Exit(1)
-}
-
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -163,6 +163,16 @@ func main() {
 
 	TEAMCITY_TOKEN = os.Getenv("TEAMCITY_TOKEN")
 	TEAMCITY_HOST = os.Getenv("TEAMCITY_HOST")
+	
+	if TEAMCITY_TOKEN == "" {
+		fmt.Fprintf(os.Stderr, "TEAMCITY_TOKEN not defined\n")
+	}
+	if TEAMCITY_HOST == "" {
+		fmt.Fprintf(os.Stderr, "TEAMCITY_HOST not defined\n")
+	}
+	if TEAMCITY_TOKEN == "" || TEAMCITY_HOST == "" {
+		os.Exit(1)
+	}
 
 	switch os.Args[1] {
 	case "status":
