@@ -281,17 +281,18 @@ func cleanupLog(logbody io.Reader, verbose int) {
 	var mode uint16
 
 	const (
-		modeRawText            = 1 << iota // shows the raw text of the output, no processing
-		modeShowHeader                     // show the TeamCity header
-		modeShowTestOutput                 // show entries marked with the [Test Output] tag
-		modeShowRoot                       // show entries without any tags
-		modeShowStep1                      // show entries marked with the [Step 1/2] tag (anywhere)
-		modeShowStep2                      // show entries marked with the [Step 2/2] tag (anywhere)
-		modeShowStep2Top                   // show entries marked with the [Step 2/2] tag (only if it's the topmost tag)
-		modeSkipBeforeDwz                  // skip Step 2/2 messages that happen before the dwz message
-		modeSkipJson                       // do not print things that are recognizable as JSON output of 'go test'
-		modeSkipBeforeMakeTest             // skip Step 2/2 messages that happen before the make test message
-		modeMassaged                       // show massaged format for modeShowStep1, modeShowStep2, modeShowHeader and modeShowTestOutput
+		modeRawText                = 1 << iota // shows the raw text of the output, no processing
+		modeShowHeader                         // show the TeamCity header
+		modeShowTestOutput                     // show entries marked with the [Test Output] tag
+		modeShowRoot                           // show entries without any tags
+		modeShowStep1                          // show entries marked with the [Step 1/2] tag (anywhere)
+		modeShowStep2                          // show entries marked with the [Step 2/2] tag (anywhere)
+		modeShowStep2Top                       // show entries marked with the [Step 2/2] tag (only if it's the topmost tag)
+		modeShowStep2OutputActions             // show all output actions in step2
+		modeSkipBeforeDwz                      // skip Step 2/2 messages that happen before the dwz message
+		modeSkipJson                           // do not print things that are recognizable as JSON output of 'go test'
+		modeSkipBeforeMakeTest                 // skip Step 2/2 messages that happen before the make test message
+		modeMassaged                           // show massaged format for modeShowStep1, modeShowStep2, modeShowHeader and modeShowTestOutput
 		modeShowOnlyFailed
 	)
 
@@ -299,7 +300,7 @@ func cleanupLog(logbody io.Reader, verbose int) {
 	case verboseNothing:
 		mode = modeShowHeader | modeShowStep2Top | modeMassaged | modeSkipBeforeMakeTest | modeShowOnlyFailed | modeSkipJson
 	case verboseGoTestVerbose:
-		mode = modeShowHeader | modeShowStep2Top | modeShowTestOutput | modeMassaged | modeSkipJson | modeSkipBeforeDwz
+		mode = modeShowHeader | modeShowStep2Top | modeShowStep2OutputActions | modeMassaged | modeSkipJson | modeSkipBeforeDwz
 	case verboseTestOutput:
 		mode = modeShowHeader | modeShowRoot | modeShowStep1 | modeShowStep2 | modeShowTestOutput | modeMassaged | modeSkipJson
 	default:
@@ -382,7 +383,9 @@ func cleanupLog(logbody io.Reader, verbose int) {
 			ll.addtext = s.Text()
 		}
 
-		if topOfStackIs("Step 2/2") {
+		buildStep := topOfStackIs("Step 2/2") || topOfStackIs("Step 1/1")
+
+		if buildStep {
 			if len(ll.text) > 0 && ll.text[0] == '{' {
 				te := &testEvent{}
 				err := json.Unmarshal([]byte(ll.text), te)
@@ -395,7 +398,7 @@ func cleanupLog(logbody io.Reader, verbose int) {
 		}
 
 		if !afterDwz {
-			if topOfStackIs("Step 2/2") {
+			if buildStep {
 				if strings.HasPrefix(ll.text, "+ dwz --version") {
 					afterDwz = true
 				}
@@ -403,7 +406,7 @@ func cleanupLog(logbody io.Reader, verbose int) {
 		}
 
 		if !afterMakeTest {
-			if topOfStackIs("Step 2/2") {
+			if buildStep {
 				if strings.HasPrefix(ll.text, "+ make test") {
 					afterMakeTest = true
 				}
@@ -422,9 +425,9 @@ func cleanupLog(logbody io.Reader, verbose int) {
 				firstMassaged = false
 				fmt.Printf("  ΔT\tTEXT\n")
 			}
-			if text[len(text)-1] == '\n' {
+			if len(text) > 0 && text[len(text)-1] == '\n' {
 				text = text[:len(text)-1]
-				if text[len(text)-1] == '\r' {
+				if len(text) > 0 && text[len(text)-1] == '\r' {
 					text = text[:len(text)-1]
 				}
 			}
@@ -473,7 +476,7 @@ func cleanupLog(logbody io.Reader, verbose int) {
 		}
 
 		if mode&modeShowStep2 != 0 || mode&modeShowStep2Top != 0 {
-			if stackHas("Step 2/2") {
+			if stackHas("Step 2/2") || stackHas("Step 1/1") {
 				shouldShow := true
 				if mode&modeSkipBeforeDwz != 0 && !afterDwz {
 					shouldShow = false
@@ -515,11 +518,28 @@ func cleanupLog(logbody io.Reader, verbose int) {
 			}
 		}
 
-		if mode&modeShowOnlyFailed != 0 && topOfStackIs("Step 2/2") && strings.HasPrefix(ll.text, "Go ") {
+		if mode&modeShowOnlyFailed != 0 && buildStep && strings.HasPrefix(ll.text, "Go ") {
 			emitText()
 		}
 
+		if mode&modeShowStep2OutputActions != 0 && ll.testEvent != nil {
+			if ll.testEvent.Action == "output" {
+				emitMassaged(ll.testEvent.Output)
+			}
+		}
+
 		if mode&modeShowOnlyFailed != 0 && ll.testEvent != nil {
+			dumpCached := func() {
+				for i := range cached {
+					ll = cached[i] // needed by emitMassaged to know the test time
+					switch ll.testEvent.Action {
+					case "output":
+						emitMassaged(ll.testEvent.Output)
+					}
+				}
+				cached = cached[:0]
+			}
+
 			cached = append(cached, ll)
 			if ll.testEvent.Test == "" {
 				switch ll.testEvent.Action {
@@ -531,6 +551,12 @@ func cleanupLog(logbody io.Reader, verbose int) {
 					cached = cached[:0]
 				case "output":
 					// do nothing
+				case "fail":
+					savedll := ll
+					dumpCached()
+					ll = savedll
+					emitMassaged(fmt.Sprintf("%s\tFAIL", ll.testEvent.Package))
+					cached = cached[:0]
 				default:
 					emitMassaged(fmt.Sprintf("%s\t%s", ll.testEvent.Package, ll.testEvent.Action))
 					cached = cached[:0]
@@ -540,14 +566,7 @@ func cleanupLog(logbody io.Reader, verbose int) {
 				case "pass":
 					cached = cached[:0]
 				case "fail":
-					for i := range cached {
-						ll = cached[i] // needed by emitMassaged to know the test time
-						switch ll.testEvent.Action {
-						case "output":
-							emitMassaged(ll.testEvent.Output)
-						}
-					}
-					cached = cached[:0]
+					dumpCached()
 				}
 			}
 		}
