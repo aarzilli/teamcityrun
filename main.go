@@ -218,6 +218,10 @@ func logparse(line string) *logline {
 			rest = rest[1:]
 		}
 	}
+	
+	if len(line) > 0 && line[0] != '[' {
+		return nil
+	}
 
 	var ll logline
 
@@ -359,7 +363,7 @@ func cleanupLog(logbody io.Reader, verbose int) {
 	for s.Scan() {
 		if mode&modeRawText != 0 {
 			fmt.Printf("%s\n", s.Text())
-			break
+			continue
 		}
 
 		if strings.HasSuffix(s.Text(), " tests processed.") {
@@ -375,6 +379,10 @@ func cleanupLog(logbody io.Reader, verbose int) {
 		}
 
 		ll := logparse(s.Text())
+		if ll == nil {
+			// weird unparsable line?
+			continue
+		}
 		treeize(ll)
 		if topOfStackIs("Test Output") {
 			if !s.Scan() {
@@ -409,6 +417,15 @@ func cleanupLog(logbody io.Reader, verbose int) {
 			if buildStep {
 				if strings.HasPrefix(ll.text, "+ make test") {
 					afterMakeTest = true
+				}
+			}
+		}
+		
+		if !afterDwz || !afterMakeTest {
+			if buildStep {
+				if strings.HasPrefix(ll.text, "Finding latest patch") {
+					afterMakeTest = true
+					afterDwz = true
 				}
 			}
 		}
