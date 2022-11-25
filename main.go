@@ -218,7 +218,7 @@ func logparse(line string) *logline {
 			rest = rest[1:]
 		}
 	}
-	
+
 	if len(line) > 0 && line[0] != '[' {
 		return nil
 	}
@@ -420,7 +420,7 @@ func cleanupLog(logbody io.Reader, verbose int) {
 				}
 			}
 		}
-		
+
 		if !afterDwz || !afterMakeTest {
 			if buildStep {
 				if strings.HasPrefix(ll.text, "Finding latest patch") {
@@ -543,6 +543,10 @@ func cleanupLog(logbody io.Reader, verbose int) {
 			if ll.testEvent.Action == "output" {
 				emitMassaged(ll.testEvent.Output)
 			}
+		}
+
+		if mode&modeShowOnlyFailed == 0 && ll.testEvent != nil && ll.testEvent.Action == "fail" && mode&modeShowStep2OutputActions == 0 {
+			emitMassaged(fmt.Sprintf("FAIL\t%s", ll.testEvent.Package))
 		}
 
 		if mode&modeShowOnlyFailed != 0 && ll.testEvent != nil {
