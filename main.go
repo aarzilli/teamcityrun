@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -22,6 +23,8 @@ func usage() {
 	teamcityrun <regex>		runs current diff on all build types matched (case insensitive) by regex
 	teamcityrun buildtypes		lists all available build types
 	teamcityrun status <build-id>	shows status of build
+	teamcityrun status		shows status of the last 200 builds on the default branch
+	teamcityrun summary	shows summary of the last 200 builds
 	teamcityrun log <build-id> [-v] shows log for build, cleaned up, add more -v to clean up less
 					can also specify a text file instead of a build-id
 	teamcityrun diff		shows current diff
@@ -45,17 +48,37 @@ func must(err error) {
 
 var TEAMCITY_TOKEN, TEAMCITY_HOST string
 
-func uploadPatch(buildName string, diff []byte) string {
-	req, err := http.NewRequest("POST", fmt.Sprintf("https://%s/uploadDiffChanges.html?description=%s&commitType=0", TEAMCITY_HOST, buildName), bytes.NewReader(diff))
+type hdopts struct {
+	ContentType string
+	Accept      string
+}
+
+func httpdo(method string, opts hdopts, path string, body io.Reader) *http.Response {
+	req, err := http.NewRequest(method, "https://"+TEAMCITY_HOST+path, body)
 	must(err)
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", TEAMCITY_TOKEN))
-	req.Header.Add("Content-Type", "text/text")
+	if opts.ContentType != "" {
+		req.Header.Add("Content-Type", opts.ContentType)
+	}
+	if opts.Accept != "" {
+		req.Header.Add("Accept", opts.Accept)
+	}
 	req.Header.Add("Origin", TEAMCITY_HOST)
 	resp, err := http.DefaultClient.Do(req)
 	must(err)
-	buf, err := ioutil.ReadAll(resp.Body)
+	return resp
+}
+
+func readall(body io.ReadCloser) []byte {
+	buf, err := ioutil.ReadAll(body)
+	must(body.Close())
 	must(err)
-	return strings.TrimSpace(string(buf))
+	return buf
+}
+
+func uploadPatch(buildName string, diff []byte) string {
+	resp := httpdo("POST", hdopts{ContentType: "text/text"}, fmt.Sprintf("/uploadDiffChanges.html?description=%s&commitType=0", buildName), bytes.NewReader(diff))
+	return strings.TrimSpace(string(readall(resp.Body)))
 }
 
 func triggerBuild(buildTypeId, changeId string) {
@@ -67,17 +90,8 @@ func triggerBuild(buildTypeId, changeId string) {
     <change id="%s" personal="true"/>
   </lastChanges>
 </build>`, buildTypeId, changeId))
-	//fmt.Printf("%s\n", build)
-	req, err := http.NewRequest("POST", fmt.Sprintf("https://%s/app/rest/buildQueue", TEAMCITY_HOST), bytes.NewReader(build))
-	must(err)
-	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", TEAMCITY_TOKEN))
-	req.Header.Add("Content-Type", "application/xml")
-	req.Header.Add("Accept", "application/json")
-	req.Header.Add("Origin", TEAMCITY_HOST)
-	resp, err := http.DefaultClient.Do(req)
-	must(err)
-	buf, err := ioutil.ReadAll(resp.Body)
-	must(err)
+	resp := httpdo("POST", hdopts{ContentType: "application/xml", Accept: "applicatoin/json"}, "/app/rest/buildQueue", bytes.NewReader(build))
+	buf := readall(resp.Body)
 	bs := decodeBuildStatus(bytes.NewReader(buf))
 	fmt.Printf("%s\n", bs.URL())
 }
@@ -100,11 +114,12 @@ func getdiff() []byte {
 }
 
 type buildStatus struct {
-	Id          int
-	BuildTypeId string
-	State       string
-	Status      string
-	StatusText  string
+	Id                int
+	BuildTypeId       string
+	State             string
+	Status            string
+	StatusText        string
+	FinishOnAgentDate string
 }
 
 func decodeBuildStatus(rd io.Reader) *buildStatus {
@@ -118,16 +133,8 @@ func (bs *buildStatus) URL() string {
 }
 
 func getBuildStatus(buildId string) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/app/rest/builds/id:%s", TEAMCITY_HOST, buildId), nil)
-	must(err)
-	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", TEAMCITY_TOKEN))
-	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Accept", "application/json")
-	req.Header.Add("Origin", TEAMCITY_HOST)
-	resp, err := http.DefaultClient.Do(req)
-	must(err)
-	buf, err := ioutil.ReadAll(resp.Body)
-	must(err)
+	resp := httpdo("GET", hdopts{ContentType: "application/json", Accept: "application/json"}, fmt.Sprintf("/app/rest/builds/id:%s", buildId), nil)
+	buf := readall(resp.Body)
 	bs := decodeBuildStatus(bytes.NewReader(buf))
 	w := tabwriter.NewWriter(os.Stdout, 8, 8, 1, ' ', 0)
 	defer w.Flush()
@@ -147,11 +154,8 @@ func getBuildTypes() []string {
 		BuildType []buildType
 	}
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/app/rest/buildTypes", TEAMCITY_HOST), nil)
-	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", TEAMCITY_TOKEN))
-	req.Header.Add("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	must(err)
+	resp := httpdo("GET", hdopts{Accept: "application/json"}, "/app/rest/buildTypes", nil)
+	defer resp.Body.Close()
 	var bts buildTypes
 	must(json.NewDecoder(resp.Body).Decode(&bts))
 	r := make([]string, len(bts.BuildType))
@@ -159,6 +163,109 @@ func getBuildTypes() []string {
 		r[i] = bts.BuildType[i].Id
 	}
 	return r
+}
+
+type buildStatusList struct {
+	Build []buildStatus
+}
+
+func getBuildStatusAll() {
+	resp := httpdo("GET", hdopts{ContentType: "application/json", Accept: "application/json"}, fmt.Sprintf("/app/rest/builds?locator=count:200"), nil)
+	defer resp.Body.Close()
+	var bslist buildStatusList
+	must(json.NewDecoder(resp.Body).Decode(&bslist))
+	w := tabwriter.NewWriter(os.Stdout, 8, 8, 1, ' ', 0)
+	defer w.Flush()
+	for _, build := range bslist.Build {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", build.BuildTypeId, build.State, build.Status, build.FinishOnAgentDate)
+	}
+}
+
+func getBuildStatusSummary() {
+	resp := httpdo("GET", hdopts{ContentType: "application/json", Accept: "application/json"}, fmt.Sprintf("/app/rest/builds?locator=count:200"), nil)
+	defer resp.Body.Close()
+	var bslist buildStatusList
+	must(json.NewDecoder(resp.Body).Decode(&bslist))
+
+	btypes := getBuildTypes()
+
+	bslast := map[string]string{}
+	bstot := map[string]int{}
+	bssucc := map[string]int{}
+	for _, build := range bslist.Build {
+		if build.State != "finished" {
+			continue
+		}
+		if bslast[build.BuildTypeId] == "" {
+			bslast[build.BuildTypeId] = build.Status
+		}
+		bstot[build.BuildTypeId]++
+		if build.Status == "SUCCESS" {
+			bssucc[build.BuildTypeId]++
+		}
+	}
+
+	conv := func(s string) string {
+		switch s {
+		case "FAILURE":
+			return "FAIL"
+		case "SUCCESS":
+			return "OK"
+		default:
+			return s
+		}
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 8, 8, 1, ' ', 0)
+	plats := map[string]struct{}{}
+	vers := map[string]struct{}{}
+	some := false
+	for _, btype := range btypes {
+		v := strings.SplitN(btype, "_", 4)
+		if len(v) != 4 || !strings.HasPrefix(btype, "Delve_") {
+			fmt.Fprintf(w, "%s\t%s\t%d/%d\n", btype, conv(bslast[btype]), bssucc[btype], bstot[btype])
+			some = true
+			continue
+		}
+		plats[v[1]+"/"+v[2]] = struct{}{}
+		vers[v[3]] = struct{}{}
+	}
+	w.Flush()
+
+	platstrs := []string{}
+	for k := range plats {
+		platstrs = append(platstrs, k)
+	}
+	sort.Strings(platstrs)
+
+	verstrs := []string{}
+	for k := range vers {
+		verstrs = append(verstrs, k)
+	}
+	sort.Strings(verstrs)
+
+	if some {
+		fmt.Println()
+	}
+
+	w = tabwriter.NewWriter(os.Stdout, 8, 8, 5, ' ', 0)
+	fmt.Fprintf(w, "\t%s\n", strings.Join(verstrs, "\t"))
+
+	for _, plat := range platstrs {
+		fmt.Fprintf(w, "%s", plat)
+		for _, ver := range verstrs {
+			btype := fmt.Sprintf("Delve_%s_%s", strings.Replace(plat, "/", "_", -1), ver)
+			if bslast[btype] != "" {
+				fmt.Fprintf(w, "\t%s %d/%d", conv(bslast[btype]), bssucc[btype], bstot[btype])
+			} else {
+				fmt.Fprintf(w, "\t")
+			}
+		}
+		fmt.Fprintf(w, "\n")
+	}
+
+	w.Flush()
+
 }
 
 func main() {
@@ -181,7 +288,14 @@ func main() {
 
 	switch os.Args[1] {
 	case "status":
-		getBuildStatus(os.Args[2])
+		if len(os.Args) > 2 {
+			getBuildStatus(os.Args[2])
+		} else {
+			getBuildStatusAll()
+		}
+
+	case "summary":
+		getBuildStatusSummary()
 
 	case "buildtypes":
 		v := getBuildTypes()
