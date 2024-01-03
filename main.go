@@ -90,7 +90,7 @@ func triggerBuild(buildTypeId, changeId string) {
     <change id="%s" personal="true"/>
   </lastChanges>
 </build>`, buildTypeId, changeId))
-	resp := httpdo("POST", hdopts{ContentType: "application/xml", Accept: "applicatoin/json"}, "/app/rest/buildQueue", bytes.NewReader(build))
+	resp := httpdo("POST", hdopts{ContentType: "application/xml", Accept: "application/json"}, "/app/rest/buildQueue", bytes.NewReader(build))
 	buf := readall(resp.Body)
 	bs := decodeBuildStatus(bytes.NewReader(buf))
 	fmt.Printf("%s\n", bs.URL())
