@@ -21,6 +21,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
 	
 	teamcityrun <regex>		runs current diff on all build types matched (case insensitive) by regex
+	teamcityrun trigger <regex>	runs the specified build (without changes)
 	teamcityrun buildtypes		lists all available build types
 	teamcityrun status <build-id>	shows status of build
 	teamcityrun status		shows status of the last 200 builds on the default branch
@@ -82,7 +83,9 @@ func uploadPatch(buildName string, diff []byte) string {
 }
 
 func triggerBuild(buildTypeId, changeId string) {
-	build := []byte(fmt.Sprintf(`<build personal="true">
+	var build []byte
+	if changeId != "" {
+		build = []byte(fmt.Sprintf(`<build personal="true">
   <triggered type='idePlugin' details='Unified Diff Patch'/>
   <triggeringOptions cleanSources="false" rebuildAllDependencies="false" queueAtTop="false"/>
   <buildType id="%s"/>
@@ -90,6 +93,13 @@ func triggerBuild(buildTypeId, changeId string) {
     <change id="%s" personal="true"/>
   </lastChanges>
 </build>`, buildTypeId, changeId))
+	} else {
+		build = []byte(fmt.Sprintf(`<build personal="false">
+  <triggered type='idePlugin'/>
+  <triggeringOptions cleanSources="true" rebuildAllDependencies="true" queueAtTop="false"/>
+  <buildType id="%s"/>
+</build>`, buildTypeId))
+	}
 	resp := httpdo("POST", hdopts{ContentType: "application/xml", Accept: "application/json"}, "/app/rest/buildQueue", bytes.NewReader(build))
 	buf := readall(resp.Body)
 	bs := decodeBuildStatus(bytes.NewReader(buf))
@@ -163,6 +173,21 @@ func getBuildTypes() []string {
 		r[i] = bts.BuildType[i].Id
 	}
 	return r
+}
+
+func getBuildTypesMatchingRegex(rx string) []string {
+	re := regexp.MustCompile("(?i:" + rx + ")")
+	bts := []string{}
+	for _, bt := range getBuildTypes() {
+		if re.MatchString(bt) {
+			bts = append(bts, bt)
+		}
+	}
+	if len(bts) == 0 {
+		fmt.Fprintf(os.Stderr, "no build types match %s\n", os.Args[1])
+		os.Exit(1)
+	}
+	return bts
 }
 
 type buildStatusList struct {
@@ -330,18 +355,15 @@ func main() {
 		diff := getdiff()
 		os.Stdout.Write(diff)
 
+	case "trigger":
+		bts := getBuildTypesMatchingRegex(os.Args[2])
+		for _, bt := range bts {
+			fmt.Printf("%s ", bt)
+			triggerBuild(bt, "")
+		}
+
 	default:
-		re := regexp.MustCompile("(?i:" + os.Args[1] + ")")
-		bts := []string{}
-		for _, bt := range getBuildTypes() {
-			if re.MatchString(bt) {
-				bts = append(bts, bt)
-			}
-		}
-		if len(bts) == 0 {
-			fmt.Fprintf(os.Stderr, "no build types match %s\n", os.Args[1])
-			os.Exit(1)
-		}
+		bts := getBuildTypesMatchingRegex(os.Args[1])
 
 		id := uploadPatch(time.Now().Format(time.RFC3339), getdiff())
 		fmt.Printf("Patch uploaded as %s\n", id)
